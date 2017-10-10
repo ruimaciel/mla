@@ -1,0 +1,17 @@
+#ifndef MLA_SOLVERS_RETURN_CODES_HPP
+#define MLA_SOLVERS_RETURN_CODES_HPP
+
+
+namespace mla
+{
+	enum ReturnCode {
+		OK = 0,
+		ERR_EXCESSIVE_ITERATIONS,
+		ERR_NOT_SQUARE,
+		ERR_SINGULAR_MATRIX
+
+	};
+}
+
+
+#endif

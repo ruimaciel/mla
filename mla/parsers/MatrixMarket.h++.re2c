@@ -1,0 +1,827 @@
+#ifndef MLA_PARSER_MATRIX_MARKET_HPP
+#define MLA_PARSER_MATRIX_MARKET_HPP
+
+#include <istream>
+#include <cstring>	// memcpy
+#include <stack>	// memcpy
+#include <functional>	// std::function
+
+#include <map>
+#include <stack>
+
+#include <mla/LAException.h++>
+
+#include <mla/Matrix/SparseDOK.h++>
+
+
+namespace mla {
+
+
+/**
+ * A parser for the MatrixMarket file format
+ */
+class MatrixMarket
+{
+private:
+	static const size_t buff_size = 64;
+	char buffer[buff_size+1];
+	char *cursor;
+	char *start_marker;
+	char *marker;
+	char *limit;
+	unsigned int current_line_number;
+
+public:
+	long integer_number;
+	double real_number;
+
+public:
+	enum ReturnCode
+	{
+		ERROR_OK,
+		ERROR_LEXER,
+		ERROR_PARSER,
+		ERROR_UNKNOWN
+	};
+
+	enum Symbol	// collection of terminal symbols (TS_) and non-terminal symbols (NTS_)
+	{
+		TS_UNKNOWN	= 0,	// nice round number to help debuging
+		TS_COMMENT,	// '%'
+		TS_STRING_MATRIX_MARKET, 	// 'MatrixMarket'
+		TS_STRING_MATRIX,		// 'matrix'
+		TS_STRING_COORDINATE,		// 'coordinate'
+		TS_STRING_ARRAY,		// 'array'
+		TS_STRING_REAL,			// 'real'
+		TS_STRING_INTEGER,		// 'integer'
+		TS_STRING_COMPLEX,		// 'complex'
+		TS_STRING_PATTERN,		// 'pattern'
+		TS_STRING_GENERAL,		// 'general'
+		TS_STRING_SYMMETRIC,		// 'symmetric'
+		TS_STRING_SKEW_SYMMETRIC,	// 'skew-symmetric'
+		TS_STRING_HERMITIAN,		// 'Hermitian'
+		TS_INTEGER_NUMBER,
+		TS_REAL_NUMBER,
+		TS_EOL,
+		TS_EOF,
+
+		NTS_START = 100,
+		NTS_DEFINE_TYPE,
+		NTS_DEFINE_MATRIX_TYPE,
+		NTS_DEFINE_ARRAY_MATRIX_TYPE,
+		NTS_DEFINE_COORDINATE_MATRIX_SCALAR_TYPE,
+		NTS_DEFINE_COORDINATE_MATRIX_STRUCTURE_TYPE,
+
+		NTS_DEFINE_REAL_ARRAY_MATRIX_STRUCTURE_TYPE,
+
+		NTS_READ_REAL_COORDINATE_MATRIX,
+		NTS_READ_INTEGER_COORDINATE_MATRIX,
+		NTS_READ_COMPLEX_COORDINATE_MATRIX,
+
+		NTS_PARSE_REAL_GENERAL_ARRAY_MATRIX,
+
+		NTS_COORDINATE_MATRIX_HEADER,	// rows, columns, NNZ entries
+		NTS_COORDINATE_MATRIX_HEADER_SET,	// resize matrix
+
+		NTS_ARRAY_MATRIX_HEADER,	// rows, columns
+		NTS_ARRAY_MATRIX_HEADER_SET,	// resize matrix
+
+		NTS_GET_ROWS,
+		NTS_GET_COLUMNS,
+		NTS_GET_NNZ,
+
+		NTS_GET_ROWS_SET,
+		NTS_GET_COLUMNS_SET,
+		NTS_GET_NNZ_SET,
+
+		NTS_MATRIX_COORDINATE,
+		NTS_MATRIX_COORDINATE_GET_I,
+		NTS_MATRIX_COORDINATE_GET_I_SET,
+		NTS_MATRIX_COORDINATE_GET_J,
+		NTS_MATRIX_COORDINATE_GET_J_SET,
+
+		NTS_REAL_COORDINATE_MATRIX_ELEMENT_LIST,
+		NTS_REAL_COORDINATE_MATRIX_ELEMENT_SET,
+
+		NTS_REAL_COORDINATE_MATRIX_ELEMENT,
+		NTS_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW,
+
+		NTS_REAL_MATRIX_ELEMENT,
+		NTS_REAL_MATRIX_ELEMENT_INTEGER_SET,
+		NTS_REAL_MATRIX_ELEMENT_SET,
+
+		NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST,
+		NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT,
+		NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_FOLLOW,
+
+		NTS_REAL_GENERAL_ARRAY_MATRIX_INTEGER_ELEMENT,
+		NTS_REAL_GENERAL_ARRAY_MATRIX_REAL_ELEMENT,
+	};
+
+	enum ParserState
+	{
+		ST_ERROR = 0,
+		ST_START,
+		ST_DEFINE_MATRIX,
+		ST_DEFINE_COORDINATE_MATRIX_TYPE,
+		ST_DEFINE_ARRAY_MATRIX_TYPE,
+
+		ST_DEFINE_COORDINATE_SCALAR_REAL,
+		ST_DEFINE_COORDINATE_SCALAR_INTEGER,
+		ST_DEFINE_COORDINATE_SCALAR_COMPLEX,
+
+		ST_DEFINE_ARRAY_MATRIX_TYPE_REAL,
+		ST_DEFINE_ARRAY_MATRIX_TYPE_INTEGER,
+		ST_DEFINE_ARRAY_MATRIX_TYPE_COMPLEX,
+
+		ST_DEFINE_REAL_GENERAL_ARRAY_MATRIX,
+		ST_DEFINE_REAL_SYMMETRIC_ARRAY_MATRIX,
+		ST_DEFINE_REAL_SKEW_SYMMETRIC_ARRAY_MATRIX,
+
+		ST_DEFINE_MATRIX_STRUCTURE_GENERAL,
+		ST_DEFINE_MATRIX_STRUCTURE_SYMMETRIC,
+		ST_DEFINE_MATRIX_STRUCTURE_SKEW_SYMMETRIC,
+
+		ST_PARSE_REAL_GENERAL_ARRAY_MATRIX,
+
+		ST_GET_COORDINATE_MATRIX_HEADER,
+		ST_GET_COORDINATE_MATRIX_HEADER_SET,
+		
+		ST_READ_REAL_COORDINATE_MATRIX,
+		ST_READ_REAL_COORDINATE_MATRIX_COMMENT,
+		ST_READ_INTEGER_COORDINATE_MATRIX,
+		ST_READ_COMPLEX_COORDINATE_MATRIX,
+
+		ST_GET_ROWS,
+		ST_GET_COLUMNS,
+		ST_GET_NNZ,
+
+		ST_GET_ROWS_SET,
+		ST_GET_COLUMNS_SET,
+		ST_GET_NNZ_SET,
+
+		ST_MATRIX_COORDINATE,
+		ST_MATRIX_COORDINATE_GET_I,
+		ST_MATRIX_COORDINATE_GET_I_SET,
+		ST_MATRIX_COORDINATE_GET_J,
+		ST_MATRIX_COORDINATE_GET_J_SET,
+
+		ST_REAL_COORDINATE_MATRIX_ELEMENTS,
+		ST_REAL_COORDINATE_MATRIX_ELEMENTS_SET,
+		ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW,
+
+		ST_REAL_COORDINATE_MATRIX_ELEMENT,
+		ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_1,
+		ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_2,
+		ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_3,
+
+		ST_REAL_MATRIX_ELEMENT_INTEGER,
+		ST_REAL_MATRIX_ELEMENT_INTEGER_SET,
+		ST_REAL_MATRIX_ELEMENT_REAL,
+		ST_REAL_MATRIX_ELEMENT_REAL_SET,
+		
+		ST_GET_ARRAY_MATRIX_HEADER,
+		ST_GET_ARRAY_MATRIX_HEADER_SET,
+
+		ST_REAL_GENERAL_ARRAY_MATRIX_REAL_ELEMENT_REAL,
+
+		ST_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST_INTEGER,
+		ST_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST_REAL
+	};
+
+	std::map<Symbol, std::map<Symbol, ParserState>>	table;
+	std::stack<Symbol>	ss;	// symbol stack
+
+
+private:
+	/**
+	 * state-dependent lexer
+	 */
+	enum Symbol (MatrixMarket::*m_current_lexer)(std::istream &) ;
+	
+
+public:
+	MatrixMarket();
+
+
+	/**
+	 * parses the contents of input_stream to a matrix
+	 */
+	template<class MatrixStoragePolicy>
+	ReturnCode parse(std::istream &input_stream, MatrixStoragePolicy &matrix);
+
+
+	enum Symbol lexer(std::istream &input_stream);
+
+	enum Symbol lexer_header(std::istream &input_stream);
+
+	enum Symbol lexer_body(std::istream &input_stream);
+
+	void fill_lexer_buffer(std::istream &input_stream, size_t n);
+
+	void reset_lexer();
+
+	void set_parser_table();
+};
+
+
+
+
+MatrixMarket::MatrixMarket()
+{
+	set_parser_table();
+	reset_lexer();
+	limit = buffer;
+}
+
+
+template<class MatrixStoragePolicy>
+MatrixMarket::ReturnCode 
+MatrixMarket::parse(std::istream &input_stream, MatrixStoragePolicy &matrix)
+{
+	// init the parser
+	current_line_number = 0;
+	m_current_lexer = &MatrixMarket::lexer_header;
+	
+	size_t rows, columns;
+	//size_t nnz;	// at present, no matrix data type uses this.  therefore, ommitted to remove warnings
+	size_t matrix_i;
+	size_t matrix_j;
+
+	double element_real;
+
+	std::function<void (MatrixStoragePolicy &matrix, size_t i, size_t j, typename MatrixStoragePolicy::scalar_type value)> matrix_setter;	// used to set the elements of a matrix
+
+
+	// set the initial symbol stack
+	ss.push(TS_EOF);
+	ss.push(NTS_START);
+
+	Symbol symbol = lexer(input_stream);
+	
+	while(!ss.empty() )
+	{
+		if(symbol == ss.top())
+		{
+			ss.pop();
+			symbol = lexer(input_stream);
+			continue;
+		}
+
+		switch( table[ss.top()][symbol] )
+		{
+			case ST_ERROR:
+				throw LAException("parser table defaulted");
+				break;
+
+			case ST_START:
+				ss.pop();
+				ss.push(NTS_DEFINE_TYPE);
+				ss.push(TS_STRING_MATRIX_MARKET);
+				ss.push(TS_COMMENT);
+				ss.push(TS_COMMENT);
+				break;
+
+			case ST_DEFINE_MATRIX:
+				ss.pop();
+				ss.push(NTS_DEFINE_MATRIX_TYPE);
+				ss.push(TS_STRING_MATRIX);
+				break;
+
+
+			case ST_DEFINE_COORDINATE_MATRIX_TYPE:
+				ss.pop();
+				ss.push(NTS_DEFINE_COORDINATE_MATRIX_SCALAR_TYPE);
+				ss.push(TS_STRING_COORDINATE);
+				break;
+
+			
+			case ST_DEFINE_ARRAY_MATRIX_TYPE:
+				ss.pop();
+				ss.push(NTS_DEFINE_ARRAY_MATRIX_TYPE);
+				ss.push(TS_STRING_ARRAY);
+				break;
+
+
+			case ST_DEFINE_COORDINATE_SCALAR_REAL:
+				ss.pop();
+				ss.push(NTS_READ_REAL_COORDINATE_MATRIX);
+				ss.push(TS_EOL);
+				ss.push(NTS_DEFINE_COORDINATE_MATRIX_STRUCTURE_TYPE);
+				ss.push(TS_STRING_REAL);
+				break;
+
+			case ST_DEFINE_COORDINATE_SCALAR_INTEGER:
+				ss.pop();
+				throw LAException("ST_DEFINE_COORDINATE_SCALAR_INTEGER: not implemented yet");
+				ss.push(NTS_READ_INTEGER_COORDINATE_MATRIX);
+				ss.push(TS_EOL);
+				ss.push(NTS_DEFINE_COORDINATE_MATRIX_STRUCTURE_TYPE);
+				ss.push(TS_STRING_INTEGER);
+				break;
+
+			case ST_DEFINE_COORDINATE_SCALAR_COMPLEX:
+				ss.pop();
+				throw LAException("ST_DEFINE_COORDINATE_SCALAR_COMPLEX: not implemented yet");
+				ss.push(NTS_READ_COMPLEX_COORDINATE_MATRIX);
+				ss.push(TS_EOL);
+				ss.push(NTS_DEFINE_COORDINATE_MATRIX_STRUCTURE_TYPE);
+				ss.push(TS_STRING_COMPLEX);
+				break;
+			
+
+			case ST_DEFINE_ARRAY_MATRIX_TYPE_REAL:
+				ss.pop();
+				ss.push(NTS_PARSE_REAL_GENERAL_ARRAY_MATRIX);
+				break;
+
+
+			case ST_DEFINE_ARRAY_MATRIX_TYPE_INTEGER:
+				ss.pop();
+				throw LAException("ST_DEFINE_ARRAY_MATRIX_TYPE_INTEGER: not implemented yet");
+				break;
+
+
+			case ST_DEFINE_ARRAY_MATRIX_TYPE_COMPLEX:
+				ss.pop();
+				throw LAException("ST_DEFINE_ARRAY_MATRIX_TYPE_COMPLEX: not implemented yet");
+				break;
+
+
+			case ST_DEFINE_REAL_GENERAL_ARRAY_MATRIX:
+				//TODO working on this
+				ss.pop();
+				ss.push(NTS_PARSE_REAL_GENERAL_ARRAY_MATRIX);
+				ss.push(TS_EOL);
+				ss.push(TS_STRING_GENERAL);
+				throw LAException("ST_DEFINE_REAL_GENERAL_ARRAY_MATRIX: not implemented yet");
+				break;
+
+
+			case ST_DEFINE_MATRIX_STRUCTURE_GENERAL:
+				ss.pop();
+				ss.push(TS_STRING_GENERAL);
+				matrix_setter = [](MatrixStoragePolicy &matrix, size_t i, size_t j, typename MatrixStoragePolicy::scalar_type value)
+				{ 
+					matrix(i-1,j-1) = value; 
+				};
+				break;
+
+
+			case ST_DEFINE_MATRIX_STRUCTURE_SYMMETRIC:
+				ss.pop();
+				ss.push(TS_STRING_SYMMETRIC);
+				matrix_setter = [](MatrixStoragePolicy &matrix, size_t i, size_t j, typename MatrixStoragePolicy::scalar_type value)
+				{ 
+					matrix(i-1,j-1) = value; 
+					matrix(j-1,i-1) = value;
+				};
+				break;
+
+			case ST_DEFINE_MATRIX_STRUCTURE_SKEW_SYMMETRIC:
+				ss.pop();
+				ss.push(TS_STRING_SKEW_SYMMETRIC);
+				matrix_setter = [](MatrixStoragePolicy &matrix, size_t i, size_t j, typename MatrixStoragePolicy::scalar_type value)
+				{ 
+					if(i!=j)
+					{
+						matrix(i-1,j-1) = value; 
+						matrix(j-1,i-1) = -value;
+					}
+				};
+				break;
+
+			case ST_READ_REAL_COORDINATE_MATRIX:
+				ss.pop();
+				ss.push(NTS_REAL_COORDINATE_MATRIX_ELEMENT_LIST);
+				ss.push(NTS_COORDINATE_MATRIX_HEADER);
+				break;
+
+			case ST_READ_REAL_COORDINATE_MATRIX_COMMENT:
+				ss.pop();
+				ss.push(NTS_READ_REAL_COORDINATE_MATRIX);
+				ss.push(TS_EOL);
+				ss.push(TS_COMMENT);
+				break;
+
+			case ST_READ_INTEGER_COORDINATE_MATRIX:
+				throw LAException("needs to implement support for integer coordinate matrix");
+				break;
+
+
+			case ST_READ_COMPLEX_COORDINATE_MATRIX:
+				throw LAException("needs to implement support for complex coordinate matrix");
+				break;
+
+
+			case ST_GET_COORDINATE_MATRIX_HEADER:
+				// parses <row> <column> <nnr> <eol>
+				ss.pop();
+				ss.push(TS_EOL);
+				ss.push(NTS_COORDINATE_MATRIX_HEADER_SET);
+				ss.push(NTS_GET_NNZ);
+				ss.push(NTS_GET_COLUMNS);
+				ss.push(NTS_GET_ROWS);
+				break;
+
+			case ST_GET_COORDINATE_MATRIX_HEADER_SET:
+				// resizes matrix
+				ss.pop();
+				matrix.resize(rows, columns);
+				break;
+
+			case ST_GET_ROWS:
+				ss.pop();
+				ss.push(TS_INTEGER_NUMBER);
+				ss.push(NTS_GET_ROWS_SET);
+				break;
+
+			case ST_GET_ROWS_SET:
+				ss.pop();
+				rows = integer_number;
+				break;
+
+			case ST_GET_COLUMNS:
+				ss.pop();
+				ss.push(TS_INTEGER_NUMBER);
+				ss.push(NTS_GET_COLUMNS_SET);
+				break;
+
+			case ST_GET_COLUMNS_SET:
+				ss.pop();
+				columns = integer_number;
+				break;
+
+			case ST_GET_NNZ:
+				ss.pop();
+				ss.push(TS_INTEGER_NUMBER);
+				ss.push(NTS_GET_NNZ_SET);
+				break;
+
+			case ST_GET_NNZ_SET:
+				ss.pop();
+				//nnz = integer_number;
+				break;
+
+			case ST_MATRIX_COORDINATE:
+				ss.pop();	
+				ss.push(NTS_MATRIX_COORDINATE_GET_J);
+				ss.push(NTS_MATRIX_COORDINATE_GET_I);
+				break;
+
+
+			case ST_MATRIX_COORDINATE_GET_I:
+				ss.pop();	
+				ss.push(TS_INTEGER_NUMBER);
+				ss.push(NTS_MATRIX_COORDINATE_GET_I_SET);
+				break;
+
+
+			case ST_MATRIX_COORDINATE_GET_I_SET:
+				ss.pop();	
+				matrix_i = integer_number;
+				break;
+
+
+			case ST_MATRIX_COORDINATE_GET_J:
+				ss.pop();	
+				ss.push(TS_INTEGER_NUMBER);
+				ss.push(NTS_MATRIX_COORDINATE_GET_J_SET);
+				break;
+
+
+			case ST_MATRIX_COORDINATE_GET_J_SET:
+				ss.pop();	
+				matrix_j = integer_number;
+				break;
+
+			case ST_REAL_COORDINATE_MATRIX_ELEMENTS:
+				ss.pop();	
+				ss.push(NTS_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW);
+				ss.push(NTS_REAL_COORDINATE_MATRIX_ELEMENT);
+				break;
+
+			case ST_REAL_COORDINATE_MATRIX_ELEMENT:
+				ss.pop();	
+				ss.push(TS_EOL);
+				ss.push(NTS_REAL_COORDINATE_MATRIX_ELEMENT_SET);
+				ss.push(NTS_REAL_MATRIX_ELEMENT);
+				ss.push(NTS_MATRIX_COORDINATE);
+				break;
+
+			case ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_1:
+				ss.pop();	
+				ss.push(NTS_REAL_COORDINATE_MATRIX_ELEMENT_LIST);
+				break;
+
+			case ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_2:
+				ss.pop();	
+				ss.push(NTS_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW);
+				ss.push(TS_EOL);
+				break;
+
+			case ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_3:
+				ss.pop();	
+				break;
+
+			case ST_REAL_COORDINATE_MATRIX_ELEMENTS_SET:
+				//TODO check if this state should be removed
+				ss.pop();	
+				element_real = real_number;
+				matrix_setter(matrix, matrix_i, matrix_j, (typename MatrixStoragePolicy::scalar_type)element_real);
+				break;
+
+			case ST_REAL_MATRIX_ELEMENT_INTEGER:
+				ss.pop();	
+				ss.push(NTS_REAL_MATRIX_ELEMENT_SET);
+				ss.push(NTS_REAL_MATRIX_ELEMENT_INTEGER_SET);	// used to convert integer to real
+				ss.push(TS_INTEGER_NUMBER);
+				break;
+
+			case ST_REAL_MATRIX_ELEMENT_INTEGER_SET:
+				ss.pop();	
+				real_number = (double)integer_number;
+				break;
+
+			case ST_REAL_MATRIX_ELEMENT_REAL:
+				ss.pop();	
+				ss.push(NTS_REAL_MATRIX_ELEMENT_SET);
+				ss.push(TS_REAL_NUMBER);
+				break;
+
+			case ST_REAL_MATRIX_ELEMENT_REAL_SET:
+				//TODO check if this state should be removed
+				ss.pop();	
+				element_real = real_number;
+				matrix_setter(matrix, matrix_i, matrix_j, (typename MatrixStoragePolicy::scalar_type)element_real);
+				break;
+
+			case ST_PARSE_REAL_GENERAL_ARRAY_MATRIX:
+				ss.pop();
+				ss.push(NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST);
+				ss.push(NTS_ARRAY_MATRIX_HEADER);
+				break;
+
+			case ST_GET_ARRAY_MATRIX_HEADER:
+				// parses <row> <column> <eol>
+				ss.pop();
+				ss.push(TS_EOL);
+				ss.push(NTS_ARRAY_MATRIX_HEADER_SET);
+				ss.push(NTS_GET_COLUMNS);
+				ss.push(NTS_GET_ROWS);
+				break;
+
+			case ST_GET_ARRAY_MATRIX_HEADER_SET:
+				// resizes the array matrix
+				ss.pop();
+				matrix.resize(rows, columns);
+				break;
+
+
+			case ST_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST_INTEGER:
+				ss.pop();
+				ss.push(NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_FOLLOW);
+				ss.push(NTS_REAL_GENERAL_ARRAY_MATRIX_INTEGER_ELEMENT);
+				break;
+
+			case ST_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST_REAL:
+				ss.pop();
+				ss.push(NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_FOLLOW);
+				ss.push(NTS_REAL_GENERAL_ARRAY_MATRIX_REAL_ELEMENT);
+				break;
+
+				throw LAException("needs to implement support for complex coordinate matrix");
+
+			default:
+				throw LAException("unknown parser state");
+		}
+	}
+
+	return ERROR_OK;
+}
+
+
+enum MatrixMarket::Symbol 
+MatrixMarket::lexer(std::istream &input_stream)
+{
+	return (this->*m_current_lexer)(input_stream);
+}
+
+
+#define YYFILL(n) fill_lexer_buffer(input_stream, n)
+/*!re2c
+re2c:yyfill:enable = 1;
+re2c:yyfill:check = 0;
+re2c:define:YYCTYPE = std::istream::char_type;
+re2c:define:YYCURSOR = cursor;
+re2c:define:YYMARKER = marker;
+
+natural = '0'|[1-9][0-9]*;
+decimal  = '-'?natural('.'[0-9]+)?;
+real = decimal([Ee][+-]?[0-9]+)?;
+eol = '\n';
+eof = '\x00';
+whitespace = [ \h\t\v\f\r]+;
+*/
+
+enum MatrixMarket::Symbol 
+MatrixMarket::lexer_header(std::istream &input_stream)
+{
+	if( cursor > limit )
+	{
+		return TS_EOF;
+	}
+
+start:
+	start_marker = cursor;
+	/*!re2c
+	"%"			{	return TS_COMMENT;			}
+	"MatrixMarket"		{	return TS_STRING_MATRIX_MARKET;	}
+	"matrix"		{	return TS_STRING_MATRIX;		}
+	"coordinate"		{	return TS_STRING_COORDINATE;		}
+	"array"			{	return TS_STRING_ARRAY;		}
+	"real"			{	return TS_STRING_REAL;		}
+	"integer"		{	return TS_STRING_INTEGER;		}
+	"complex"		{	return TS_STRING_COMPLEX;		}
+	"pattern"		{	return TS_STRING_PATTERN;		}
+	"general"		{	return TS_STRING_GENERAL;		}
+	"symmetric"		{	return TS_STRING_SYMMETRIC;		}
+	"skew-symmetric"	{	return TS_STRING_SKEW_SYMMETRIC;	}
+	"Hermitian"		{	return TS_STRING_HERMITIAN;		}
+	whitespace		{	goto start;		}
+	eol			{	
+					m_current_lexer = &MatrixMarket::lexer_body; 
+					current_line_number++;
+					return TS_EOL;			
+				}
+	eof			{	return TS_EOF;			}
+	[^]			{	return TS_UNKNOWN;			}
+	*/
+}
+
+
+enum MatrixMarket::Symbol 
+MatrixMarket::lexer_body(std::istream &input_stream)
+{
+	if( cursor > limit )
+	{
+		return TS_EOF;
+	}
+
+start:
+	start_marker = cursor;
+	/*!re2c
+	"%"(.\(eol|eof))*	{	return TS_COMMENT;	}
+	whitespace		{	goto start;			}
+	eol			{	
+					current_line_number++;
+					return TS_EOL;		
+				}
+	eof			{	return TS_EOF;		}
+	natural			{	
+					std::string number(start_marker, cursor-start_marker);
+					integer_number = std::stol(number);
+					return TS_INTEGER_NUMBER;	
+				}
+	'0'[0-9]+		{	return TS_UNKNOWN;		}
+	real			{	
+					std::string number(start_marker, cursor-start_marker);
+					real_number = std::stod(number);
+					return TS_REAL_NUMBER;	
+				}
+	[^]			{	return TS_UNKNOWN;		}
+	*/
+}
+
+
+void 
+MatrixMarket::fill_lexer_buffer(std::istream &input_stream, size_t n)
+{
+	using namespace std;
+
+	if(limit < cursor + n)
+	{
+		//FIXIT if comment length > buffer_size, this will fail
+		memmove(buffer, start_marker, limit-start_marker+1);
+
+		// reposition pointers
+		size_t delta = start_marker-buffer;
+		start_marker = buffer;
+		cursor -= delta;
+		marker -= delta;
+		limit -= delta;
+
+		// re-fill the rest of the buffer
+		if( input_stream.good() )
+		{
+			size_t filled_buffer = limit - buffer;
+			input_stream.read(limit,  buff_size - filled_buffer);
+
+			size_t filled_count = input_stream.gcount();
+			limit += filled_count;
+			*limit = '\0';
+		}
+
+	}
+} 
+
+
+void 
+MatrixMarket::reset_lexer()
+{
+	cursor = buffer;
+	start_marker = buffer;
+	marker = buffer;
+	limit = &buffer[buff_size];
+	memset(buffer,'\0', buff_size);
+}
+
+
+void 
+MatrixMarket::set_parser_table()
+{
+	table[NTS_START][TS_COMMENT]	= ST_START;
+
+	table[NTS_DEFINE_TYPE][TS_STRING_MATRIX]			= ST_DEFINE_MATRIX;
+
+	table[NTS_DEFINE_MATRIX_TYPE][TS_STRING_COORDINATE]		= ST_DEFINE_COORDINATE_MATRIX_TYPE;
+	table[NTS_DEFINE_MATRIX_TYPE][TS_STRING_ARRAY]			= ST_DEFINE_ARRAY_MATRIX_TYPE;
+
+	table[NTS_DEFINE_COORDINATE_MATRIX_SCALAR_TYPE][TS_STRING_REAL]		= ST_DEFINE_COORDINATE_SCALAR_REAL;
+	table[NTS_DEFINE_COORDINATE_MATRIX_SCALAR_TYPE][TS_STRING_INTEGER]	= ST_DEFINE_COORDINATE_SCALAR_INTEGER;
+	table[NTS_DEFINE_COORDINATE_MATRIX_SCALAR_TYPE][TS_STRING_COMPLEX]	= ST_DEFINE_COORDINATE_SCALAR_COMPLEX;
+
+	table[NTS_DEFINE_ARRAY_MATRIX_TYPE][TS_STRING_REAL]		= ST_DEFINE_ARRAY_MATRIX_TYPE_REAL;
+	table[NTS_DEFINE_ARRAY_MATRIX_TYPE][TS_STRING_INTEGER]		= ST_DEFINE_ARRAY_MATRIX_TYPE_INTEGER;
+	table[NTS_DEFINE_ARRAY_MATRIX_TYPE][TS_STRING_COMPLEX]		= ST_DEFINE_ARRAY_MATRIX_TYPE_COMPLEX;
+
+	table[NTS_DEFINE_REAL_ARRAY_MATRIX_STRUCTURE_TYPE][TS_STRING_GENERAL]		= ST_DEFINE_REAL_GENERAL_ARRAY_MATRIX;
+	/*
+	table[NTS_DEFINE_REAL_ARRAY_MATRIX_STRUCTURE_TYPE][TS_STRING_SYMMETRIC]		= ST_DEFINE_REAL_SYMMETRIC_ARRAY_MATRIX;
+	table[NTS_DEFINE_REAL_ARRAY_MATRIX_STRUCTURE_TYPE][TS_STRING_SKEW_SYMMETRIC]	= ST_DEFINE_REAL_SKEW_SYMMETRIC_ARRAY_MATRIX;
+	*/
+
+	table[NTS_PARSE_REAL_GENERAL_ARRAY_MATRIX][TS_INTEGER_NUMBER]		= ST_PARSE_REAL_GENERAL_ARRAY_MATRIX;
+
+	table[NTS_DEFINE_COORDINATE_MATRIX_STRUCTURE_TYPE][TS_STRING_GENERAL]		= ST_DEFINE_MATRIX_STRUCTURE_GENERAL;
+	table[NTS_DEFINE_COORDINATE_MATRIX_STRUCTURE_TYPE][TS_STRING_SYMMETRIC]		= ST_DEFINE_MATRIX_STRUCTURE_SYMMETRIC;
+	table[NTS_DEFINE_COORDINATE_MATRIX_STRUCTURE_TYPE][TS_STRING_SKEW_SYMMETRIC]	= ST_DEFINE_MATRIX_STRUCTURE_SKEW_SYMMETRIC;
+
+	table[NTS_READ_REAL_COORDINATE_MATRIX][TS_INTEGER_NUMBER]	= ST_READ_REAL_COORDINATE_MATRIX;
+	table[NTS_READ_REAL_COORDINATE_MATRIX][TS_COMMENT]		= ST_READ_REAL_COORDINATE_MATRIX_COMMENT;
+
+	// parse the coordinate format header
+	table[NTS_COORDINATE_MATRIX_HEADER][TS_INTEGER_NUMBER]		= ST_GET_COORDINATE_MATRIX_HEADER;
+	table[NTS_COORDINATE_MATRIX_HEADER_SET][TS_EOL]			= ST_GET_COORDINATE_MATRIX_HEADER_SET;
+
+	table[NTS_GET_ROWS][TS_INTEGER_NUMBER]				= ST_GET_ROWS;
+	table[NTS_GET_COLUMNS][TS_INTEGER_NUMBER]			= ST_GET_COLUMNS;
+	table[NTS_GET_NNZ][TS_INTEGER_NUMBER]				= ST_GET_NNZ;
+
+	table[NTS_GET_ROWS_SET][TS_INTEGER_NUMBER]			= ST_GET_ROWS_SET;
+	table[NTS_GET_COLUMNS_SET][TS_INTEGER_NUMBER]			= ST_GET_COLUMNS_SET;
+	table[NTS_GET_NNZ_SET][TS_INTEGER_NUMBER]			= ST_GET_NNZ_SET;
+
+	table[NTS_MATRIX_COORDINATE][TS_INTEGER_NUMBER]			= ST_MATRIX_COORDINATE;
+
+	table[NTS_MATRIX_COORDINATE_GET_I][TS_INTEGER_NUMBER]		= ST_MATRIX_COORDINATE_GET_I;
+	table[NTS_MATRIX_COORDINATE_GET_J][TS_INTEGER_NUMBER]		= ST_MATRIX_COORDINATE_GET_J;
+
+	table[NTS_MATRIX_COORDINATE_GET_I_SET][TS_INTEGER_NUMBER]	= ST_MATRIX_COORDINATE_GET_I_SET;
+	table[NTS_MATRIX_COORDINATE_GET_I_SET][TS_REAL_NUMBER]		= ST_MATRIX_COORDINATE_GET_I_SET;
+
+	table[NTS_MATRIX_COORDINATE_GET_J_SET][TS_INTEGER_NUMBER]	= ST_MATRIX_COORDINATE_GET_J_SET;
+	table[NTS_MATRIX_COORDINATE_GET_J_SET][TS_REAL_NUMBER]		= ST_MATRIX_COORDINATE_GET_J_SET;
+
+	// parse the element list for the real coordinate matrix format 
+	table[NTS_REAL_COORDINATE_MATRIX_ELEMENT_LIST][TS_INTEGER_NUMBER]	= ST_REAL_COORDINATE_MATRIX_ELEMENTS;
+
+	table[NTS_REAL_COORDINATE_MATRIX_ELEMENT][TS_INTEGER_NUMBER]		= ST_REAL_COORDINATE_MATRIX_ELEMENT;
+
+	table[NTS_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW][TS_INTEGER_NUMBER]	= ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_1;
+	table[NTS_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW][TS_EOL]		= ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_2;
+	table[NTS_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW][TS_EOF]		= ST_REAL_COORDINATE_MATRIX_ELEMENT_FOLLOW_3;
+
+	table[NTS_REAL_COORDINATE_MATRIX_ELEMENT_SET][TS_EOL]		= ST_REAL_COORDINATE_MATRIX_ELEMENTS_SET;
+
+	table[NTS_REAL_MATRIX_ELEMENT][TS_INTEGER_NUMBER]		= ST_REAL_MATRIX_ELEMENT_INTEGER;
+	table[NTS_REAL_MATRIX_ELEMENT][TS_REAL_NUMBER]			= ST_REAL_MATRIX_ELEMENT_REAL;
+
+	// convert integer to real
+	table[NTS_REAL_MATRIX_ELEMENT_INTEGER_SET][TS_EOL]		= ST_REAL_MATRIX_ELEMENT_INTEGER_SET;
+	table[NTS_REAL_MATRIX_ELEMENT_SET][TS_EOL]			= ST_REAL_MATRIX_ELEMENT_REAL_SET;
+
+	//TODO working on this
+	table[NTS_ARRAY_MATRIX_HEADER][TS_INTEGER_NUMBER]		= ST_GET_ARRAY_MATRIX_HEADER;
+	table[NTS_ARRAY_MATRIX_HEADER_SET][TS_EOL]			= ST_GET_ARRAY_MATRIX_HEADER_SET;
+
+	table[NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST][TS_INTEGER_NUMBER]	= ST_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST_INTEGER;
+	table[NTS_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST][TS_REAL_NUMBER]	= ST_REAL_GENERAL_ARRAY_MATRIX_ELEMENT_LIST_REAL;
+
+	table[NTS_REAL_GENERAL_ARRAY_MATRIX_REAL_ELEMENT][TS_REAL_NUMBER]	= ST_REAL_GENERAL_ARRAY_MATRIX_REAL_ELEMENT_REAL;
+}
+
+
+}	// namespace mla
+
+#endif
